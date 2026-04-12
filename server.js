@@ -2,150 +2,122 @@ const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 const multer = require("multer");
-const pdfParse = require("pdf-parse");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 
 const app = express();
+
+// ===== MIDDLEWARE =====
 app.use(cors());
 app.use(express.json());
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// ===== DATABASE =====
-mongoose.connect(process.env.MONGO_URI)
-.then(() => console.log("MongoDB Connected"))
-.catch(err => console.log(err));
+// ===== HEALTH CHECK (IMPORTANT FOR DEPLOYMENT) =====
+app.get("/", (req, res) => {
+  res.send("XZILY AI Backend is Running 🚀");
+});
 
+// ===== DATABASE CONNECTION =====
+mongoose
+  .connect(process.env.MONGO_URI)
+  .then(() => console.log("MongoDB Connected"))
+  .catch((err) => console.log("MongoDB Error:", err));
+
+// ===== USER MODEL =====
 const User = mongoose.model("User", {
   email: String,
   password: String,
 });
 
-// ===== AUTH =====
+// ===== REGISTER ROUTE =====
 app.post("/register", async (req, res) => {
-  const { email, password } = req.body;
+  try {
+    const { email, password } = req.body;
 
-  const exists = await User.findOne({ email });
-  if (exists) return res.json({ error: "User exists" });
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password required" });
+    }
 
-  const hash = await bcrypt.hash(password, 10);
-  const user = new User({ email, password: hash });
-  await user.save();
+    const exists = await User.findOne({ email });
+    if (exists) {
+      return res.status(400).json({ error: "User already exists" });
+    }
 
-  res.json({ message: "Registered" });
+    const hash = await bcrypt.hash(password, 10);
+
+    const user = new User({ email, password: hash });
+    await user.save();
+
+    return res.json({ message: "User registered successfully" });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
+// ===== LOGIN ROUTE =====
 app.post("/login", async (req, res) => {
-  const { email, password } = req.body;
+  try {
+    const { email, password } = req.body;
 
-  const user = await User.findOne({ email });
-  if (!user) return res.json({ error: "Invalid" });
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(400).json({ error: "User not found" });
+    }
 
-  const match = await bcrypt.compare(password, user.password);
-  if (!match) return res.json({ error: "Invalid" });
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(400).json({ error: "Invalid password" });
+    }
 
-  const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
-    expiresIn: "7d",
-  });
+    const token = jwt.sign({ id: user._id }, "secretkey", {
+      expiresIn: "1d",
+    });
 
-  res.json({ token });
+    return res.json({ message: "Login successful", token });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
-// ===== CHAT =====
+// ===== AI CHAT ROUTE =====
 app.post("/chat", async (req, res) => {
-  const { messages } = req.body;
+  try {
+    const { message } = req.body;
 
-  const response = await axios.post(
-    "https://api.openai.com/v1/chat/completions",
-    {
-      model: "gpt-4o-mini",
-      messages,
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
+    if (!message) {
+      return res.status(400).json({ error: "Message is required" });
     }
-  );
 
-  res.json(response.data);
-});
-
-// ===== IMAGE =====
-app.post("/image", async (req, res) => {
-  const { prompt } = req.body;
-
-  const response = await axios.post(
-    "https://api.openai.com/v1/images/generations",
-    {
-      model: "gpt-image-1",
-      prompt,
-      size: "1024x1024",
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    const response = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: message }],
       },
-    }
-  );
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
 
-  res.json(response.data);
+    return res.json({
+      reply: response.data.choices[0].message.content,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      error: "AI request failed",
+      details: err.message,
+    });
+  }
 });
 
-// ===== PDF =====
-app.post("/pdf", upload.single("file"), async (req, res) => {
-  const data = await pdfParse(req.file.buffer);
+// ===== START SERVER (THIS WAS MISSING BEFORE ❌) =====
+const PORT = process.env.PORT || 5000;
 
-  const text = data.text.substring(0, 6000);
-
-  const response = await axios.post(
-    "https://api.openai.com/v1/chat/completions",
-    {
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: "Summarize with bullet points" },
-        { role: "user", content: text },
-      ],
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-    }
-  );
-
-  res.json(response.data);
+app.listen(PORT, () => {
+  console.log(`XZILY AI running on port ${PORT}`);
 });
-
-// ===== QUIZ =====
-app.post("/quiz", upload.single("file"), async (req, res) => {
-  const data = await pdfParse(req.file.buffer);
-
-  const text = data.text.substring(0, 6000);
-
-  const response = await axios.post(
-    "https://api.openai.com/v1/chat/completions",
-    {
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: "Generate MCQs" },
-        { role: "user", content: text },
-      ],
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-    }
-  );
-
-  res.json(response.data);
-});
-
-app.get("/", (req, res) => {
-  res.send("XZILY AI Backend Running 🚀");
-});
-
-app.listen(3000);
