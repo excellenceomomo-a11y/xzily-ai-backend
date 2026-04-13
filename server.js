@@ -381,6 +381,11 @@ app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 // ──────────────────────────────────────────────────────────
 // START SERVER
 // ──────────────────────────────────────────────────────────
+setInterval(() => {
+  fetch(`https://your-backend.onrender.com/health`)
+    .then(() => console.log('Keep-alive ping sent'))
+    .catch(() => {});
+}, 14 * 60 * 1000);
 app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════╗
