@@ -31,7 +31,7 @@ const app  = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors({
-  origin: 'https://xzily-ai-frontemd.vercel.app',  // In production, restrict to your frontend domain
+  origin: 'https://xzily-ai-frontend.vercel.app',  // In production, restrict to your frontend domain
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
