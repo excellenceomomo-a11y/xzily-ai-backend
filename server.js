@@ -30,7 +30,14 @@ const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...ar
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors({ origin: 'https://xzily-ai-frontend.vercel.app', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type', 'Authorization'] }));
+app.use(cors({
+  origin: [
+    'https://xzily-ai-frontend.vercel.app',
+    'http://localhost:3000'
+  ],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
