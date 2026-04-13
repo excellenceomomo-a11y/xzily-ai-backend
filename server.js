@@ -382,8 +382,8 @@ app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 // START SERVER
 // ──────────────────────────────────────────────────────────
 setInterval(() => {
-  fetch(`https://your-backend.onrender.com/health`)
-    .then(() => console.log('Keep-alive ping sent'))
+  fetch('https://xzily-ai-backend-8.onrender.com/health')
+    .then(() => console.log('Keep-alive ping'))
     .catch(() => {});
 }, 14 * 60 * 1000);
 app.listen(PORT, () => {
