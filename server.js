@@ -3,22 +3,42 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
-const fetch = require("node-fetch");
+const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const multer = require("multer");
 const FormData = require("form-data");
+const fs = require("fs");
+const jwt = require("jsonwebtoken");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
-const upload = multer();
+const upload = multer({ dest: "uploads/" });
 
 app.use(cors({ origin: "*" }));
 app.use(express.json());
+if (!fs.existsSync("uploads")) {
+  fs.mkdirSync("uploads");
+}
 
 // ================== ENV ==================
 const PORT = process.env.PORT || 3000;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const SERP_API_KEY = process.env.SERP_API_KEY;
+function authMiddleware(req, res, next) {
+  const token = req.headers.authorization;
+
+  if (!token) {
+    return res.status(401).json({ error: "No token provided" });
+  }
+
+  try {
+    const decoded = jwt.verify(token.split(" ")[1], process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+}
 
 // ================== DB ==================
 mongoose.connect(process.env.MONGO_URI)
@@ -43,6 +63,22 @@ async function saveMemory(userId, text) {
     { $set: { memory: text } },
     { upsert: true }
   );
+}
+const Chat = mongoose.model("Chat", {
+  userId: String,
+  title: String,
+  messages: [
+    {
+      role: String,
+      content: String
+    }
+  ]
+});
+
+function cleanupFile(path) {
+  fs.unlink(path, (err) => {
+    if (err) console.error("File cleanup error:", err);
+  });
 }
 
 // ================== SYSTEM PROMPT ==================
@@ -182,6 +218,20 @@ async function callAI(messages) {
     } catch {
       return "AI services are unavailable. Try again later.";
     }
+  }
+}
+async function callGroqVision(base64Image, mimeType, prompt) {
+  try {
+    const messages = [
+      {
+        role: "user",
+        content: `${prompt} (User uploaded an image)`
+      }
+    ];
+
+    return await callAI(messages);
+  } catch (err) {
+    return "Image analysis failed.";
   }
 }
 
