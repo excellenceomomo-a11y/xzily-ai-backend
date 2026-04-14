@@ -82,6 +82,24 @@ function getWaitTime() {
 }
 
 // ================== GROQ ==================
+const KEEP_ALIVE_URL =
+  process.env.KEEP_ALIVE_URL ||
+  'https://xzily-ai-backend-8.onrender.com/health';
+
+async function pingServer() {
+  try {
+    const res = await fetch(KEEP_ALIVE_URL);
+    console.log(res.ok ? '🔄 Keep-alive success' : '⚠️ Keep-alive issue');
+  } catch (err) {
+    console.log('❌ Keep-alive failed:', err.message);
+  }
+}
+
+// run once on startup
+pingServer();
+
+// repeat every 12 minutes (BEST PRACTICE)
+setInterval(pingServer, 12 * 60 * 1000);
 async function callGroq(messages) {
   const res = await fetch(GROQ_API_URL, {
     method: "POST",
