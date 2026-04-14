@@ -271,7 +271,6 @@ async function webSearch(query) {
 
 function cleanupFile(fp) { if (fp && fs.existsSync(fp)) fs.unlink(fp, () => {}); }
 
-module.exports = { app, User, Chat, upload, authMiddleware, callAI, callAIVision, webSearch, SYSTEM_PROMPT, cleanupFile, pdfParse, mammoth, PORT };
 /**
  * ═══════════════════════════════════════════════════════
  *  XZILY AI — Backend Server (Part 2 of 2)
@@ -451,7 +450,7 @@ app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
 // ── START ──
 app.listen(PORT, () => {
-  console.log('\n  XZILY AI Server running on port ' + PORT + '\n  Multi-AI: Groq + Gemini\n  Web Search: SerpAPI\n  Built by Excellence Omomo, FUTA\n');
+  console.log(`🚀 XZILY AI server running on port ${PORT}`);
 });
 
 module.exports = app;
