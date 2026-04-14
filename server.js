@@ -1,166 +1,274 @@
-require("dotenv").config();
+/**
+ * ═══════════════════════════════════════════════════════
+ *  XZILY AI — Backend Server (Part 1 of 2)
+ *  Stack: Express · MongoDB · JWT · Groq · Gemini · SerpAPI
+ *  Built by Excellence Omomo, FUTA
+ * ═══════════════════════════════════════════════════════
+ */
 
-const express = require("express");
-const cors = require("cors");
-const mongoose = require("mongoose");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const multer = require("multer");
-const fs = require("fs");
-const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+require('dotenv').config();
 
-const app = express();
-const upload = multer({ dest: "uploads/" });
+const express  = require('express');
+const cors     = require('cors');
+const mongoose = require('mongoose');
+const bcrypt   = require('bcryptjs');
+const jwt      = require('jsonwebtoken');
+const multer   = require('multer');
+const fs       = require('fs');
+const path     = require('path');
 
-app.use(cors());
-app.use(express.json());
+let pdfParse, mammoth;
+try { pdfParse = require('pdf-parse'); } catch { console.warn('pdf-parse not found'); }
+try { mammoth  = require('mammoth');   } catch { console.warn('mammoth not found'); }
 
-// ───────── ENV ─────────
+const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
+
+// ──────────────────────────────────────────────────────────
+// EXPRESS SETUP
+// ──────────────────────────────────────────────────────────
+const app  = express();
 const PORT = process.env.PORT || 3000;
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const SERP_API_KEY = process.env.SERP_API_KEY;
-const JWT_SECRET = process.env.JWT_SECRET;
 
-// ───────── DB ─────────
-mongoose.connect(process.env.MONGO_URI);
+app.use(cors({ origin: '*', methods: ['GET','POST','OPTIONS'], allowedHeaders: ['Content-Type','Authorization'] }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-const User = mongoose.model("User", {
-  username: String,
-  password: String
+// ──────────────────────────────────────────────────────────
+// MONGODB
+// ──────────────────────────────────────────────────────────
+const MONGO_URI = process.env.MONGO_URI;
+if (!MONGO_URI) { console.error('MONGO_URI not set'); process.exit(1); }
+console.log('Connecting to MongoDB...');
+mongoose.connect(MONGO_URI)
+  .then(() => console.log('MongoDB connected'))
+  .catch(err => { console.error('MongoDB failed:', err.message); process.exit(1); });
+
+// ──────────────────────────────────────────────────────────
+// SCHEMAS
+// ──────────────────────────────────────────────────────────
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true, trim: true, minlength: 3 },
+  password: { type: String, required: true }
+}, { timestamps: true });
+
+const chatSchema = new mongoose.Schema({
+  userId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  title:    { type: String, default: 'New Chat' },
+  model:    { type: String, default: 'groq:llama-3.3-70b-versatile' },
+  messages: [{
+    role:      { type: String, enum: ['user','assistant'], required: true },
+    content:   { type: String, required: true },
+    createdAt: { type: Date, default: Date.now }
+  }]
+}, { timestamps: true });
+
+const User = mongoose.model('User', userSchema);
+const Chat = mongoose.model('Chat', chatSchema);
+
+// ──────────────────────────────────────────────────────────
+// MULTER
+// ──────────────────────────────────────────────────────────
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename:    (req, file, cb) => cb(null, Date.now() + '-' + file.originalname.replace(/\s+/g,'_'))
 });
 
-const Chat = mongoose.model("Chat", {
-  userId: String,
-  title: String,
-  messages: Array
-});
-
-// ───────── AUTH ─────────
-function auth(req, res, next) {
-  const token = req.headers.authorization?.split(" ")[1];
-  if (!token) return res.status(401).json({ error: "Unauthorized" });
-
-  try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    next();
-  } catch {
-    res.status(401).json({ error: "Invalid token" });
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['application/pdf','application/vnd.openxmlformats-officedocument.wordprocessingml.document','text/plain','image/jpeg','image/png','image/gif','image/webp'];
+    allowed.includes(file.mimetype) ? cb(null, true) : cb(new Error('Unsupported file type'));
   }
+});
+
+// ──────────────────────────────────────────────────────────
+// JWT MIDDLEWARE
+// ──────────────────────────────────────────────────────────
+function authMiddleware(req, res, next) {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
+  try { req.user = jwt.verify(header.split(' ')[1], process.env.JWT_SECRET); next(); }
+  catch { return res.status(401).json({ error: 'Invalid or expired token' }); }
 }
 
-// ───────── AI SETUP ─────────
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+// ──────────────────────────────────────────────────────────
+// SYSTEM PROMPT — Identity rules baked in
+// ──────────────────────────────────────────────────────────
+const SYSTEM_PROMPT = {
+  role: 'system',
+  content: `You are XZILY AI, an intelligent and helpful AI assistant.
 
-async function callGroq(messages) {
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${GROQ_API_KEY}`
-    },
+IDENTITY RULES (follow strictly):
+- Do NOT introduce yourself unless asked.
+- Do NOT mention Groq, Gemini, or any external AI provider under any circumstances.
+- If asked who created/built/developed you, reply EXACTLY: "I'm XZILY AI, built and developed by Excellence Omomo, a student of the Federal University of Technology Akure."
+- If asked when you were launched, reply EXACTLY: "I was launched on Monday, 13th April, 2026."
+- If asked why you were built, reply EXACTLY: "I was created with a vision to explore artificial intelligence and develop solutions that address real human challenges."
+- For all other questions, respond naturally, intelligently, and helpfully.
+
+RESPONSE RULES:
+- Be concise, accurate, and helpful.
+- Format code with proper markdown code blocks.
+- When given web search results, use them to provide accurate up-to-date answers.`
+};
+
+// ──────────────────────────────────────────────────────────
+// MULTI-AI ENGINE — Groq + Gemini
+// ──────────────────────────────────────────────────────────
+
+/**
+ * Parse model string → { provider, model }
+ * Format: "groq:llama-3.3-70b-versatile" or "gemini:gemini-2.0-flash"
+ */
+function parseModel(modelStr = '') {
+  const [provider, ...rest] = modelStr.split(':');
+  const model = rest.join(':') || 'llama-3.3-70b-versatile';
+  return { provider: provider || 'groq', model };
+}
+
+/**
+ * Call Groq API (OpenAI-compatible format)
+ */
+async function callGroq(messages, model = 'llama-3.3-70b-versatile', maxTokens = 1024) {
+  if (!process.env.GROQ_API_KEY) throw new Error('Groq API key not configured.');
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type':'application/json', 'Authorization':'Bearer ' + process.env.GROQ_API_KEY },
+    body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature: 0.7 })
+  });
+  if (!response.ok) { const err = await response.json(); throw new Error(err.error?.message || 'Groq API error'); }
+  const data = await response.json();
+  return data.choices[0].message.content.trim();
+}
+
+/**
+ * Call Gemini API
+ */
+async function callGemini(messages, model = 'gemini-2.0-flash', maxTokens = 1024) {
+  if (!process.env.GEMINI_API_KEY) throw new Error('Gemini API key not configured.');
+
+  // Convert messages to Gemini format
+  // System prompt gets prepended to first user message
+  const systemText = messages.find(m => m.role === 'system')?.content || '';
+  const chatMessages = messages.filter(m => m.role !== 'system');
+
+  const contents = chatMessages.map((m, idx) => {
+    let text = m.content;
+    // Prepend system prompt to first user message
+    if (idx === 0 && m.role === 'user' && systemText) {
+      text = systemText + '\n\nUser: ' + text;
+    }
+    return {
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text }]
+    };
+  });
+
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + process.env.GEMINI_API_KEY;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: "llama-3.1-8b-instant",
-      messages
+      contents,
+      generationConfig: { maxOutputTokens: maxTokens, temperature: 0.7 }
     })
   });
 
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || "Error";
+  if (!response.ok) { const err = await response.json(); throw new Error(err.error?.message || 'Gemini API error'); }
+  const data = await response.json();
+  return data.candidates[0].content.parts[0].text.trim();
 }
 
-async function callGemini(messages) {
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-  const prompt = messages.map(m => m.content).join("\n");
-  const result = await model.generateContent(prompt);
-  return result.response.text();
+/**
+ * Call Gemini Vision API with image
+ */
+async function callGeminiVision(base64Image, mimeType, prompt, model = 'gemini-2.0-flash') {
+  if (!process.env.GEMINI_API_KEY) throw new Error('Gemini API key not configured.');
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + process.env.GEMINI_API_KEY;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{
+        parts: [
+          { text: prompt || 'Describe and analyze this image in detail.' },
+          { inline_data: { mime_type: mimeType, data: base64Image } }
+        ]
+      }],
+      generationConfig: { maxOutputTokens: 1024, temperature: 0.7 }
+    })
+  });
+  if (!response.ok) { const err = await response.json(); throw new Error(err.error?.message || 'Gemini Vision error'); }
+  const data = await response.json();
+  return data.candidates[0].content.parts[0].text.trim();
 }
 
-async function searchWeb(q) {
-  const res = await fetch(`https://serpapi.com/search.json?q=${q}&api_key=${SERP_API_KEY}`);
-  const data = await res.json();
-  return (data.organic_results || []).slice(0, 3).map(r => r.snippet).join("\n");
+/**
+ * Groq Vision API
+ */
+async function callGroqVision(base64Image, mimeType, prompt) {
+  if (!process.env.GROQ_API_KEY) throw new Error('Groq API key not configured.');
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type':'application/json', 'Authorization':'Bearer ' + process.env.GROQ_API_KEY },
+    body: JSON.stringify({
+      model: 'llama-3.2-11b-vision-preview',
+      messages: [{ role:'user', content:[
+        { type:'text', text: prompt || 'Describe and analyze this image in detail.' },
+        { type:'image_url', image_url:{ url:'data:' + mimeType + ';base64,' + base64Image } }
+      ]}],
+      max_tokens: 1024
+    })
+  });
+  if (!response.ok) { const err = await response.json(); throw new Error(err.error?.message || 'Groq Vision error'); }
+  const data = await response.json();
+  return data.choices[0].message.content.trim();
 }
 
-async function AI(messages) {
+/**
+ * Master AI dispatcher — routes to correct provider
+ */
+async function callAI(messages, modelStr = 'groq:llama-3.3-70b-versatile', maxTokens = 1024) {
+  const { provider, model } = parseModel(modelStr);
+  if (provider === 'gemini') return callGemini(messages, model, maxTokens);
+  return callGroq(messages, model, maxTokens);
+}
+
+/**
+ * Master Vision dispatcher
+ */
+async function callAIVision(base64Image, mimeType, prompt, modelStr = 'groq:llama-3.2-11b-vision-preview') {
+  const { provider, model } = parseModel(modelStr);
+  if (provider === 'gemini') return callGeminiVision(base64Image, mimeType, prompt, model);
+  return callGroqVision(base64Image, mimeType, prompt);
+}
+
+// ──────────────────────────────────────────────────────────
+// WEB SEARCH — SerpAPI
+// Get free key at serpapi.com (100 searches/month free)
+// ──────────────────────────────────────────────────────────
+async function webSearch(query) {
+  const apiKey = process.env.SERPAPI_KEY;
+  if (!apiKey) { console.warn('SERPAPI_KEY not set — web search disabled'); return null; }
   try {
-    return await callGroq(messages);
-  } catch {
-    return await callGemini(messages);
-  }
+    const url = 'https://serpapi.com/search.json?q=' + encodeURIComponent(query) + '&api_key=' + apiKey + '&num=5&hl=en';
+    const res  = await fetch(url);
+    if (!res.ok) return null;
+    const data    = await res.json();
+    const results = (data.organic_results || []).slice(0, 4).map(r => ({
+      title: r.title, snippet: r.snippet, url: r.link
+    }));
+    if (!results.length) return null;
+    const context = results.map((r,i) => '[' + (i+1) + '] ' + r.title + '\n' + r.snippet + '\nURL: ' + r.url).join('\n\n');
+    return { context, sources: results };
+  } catch (err) { console.error('Web search error:', err.message); return null; }
 }
 
-// ───────── AUTH ROUTES ─────────
-app.post("/register", async (req, res) => {
-  const { username, password } = req.body;
-  const hash = await bcrypt.hash(password, 10);
-  await User.create({ username, password: hash });
-  res.json({ success: true });
-});
+function cleanupFile(fp) { if (fp && fs.existsSync(fp)) fs.unlink(fp, () => {}); }
 
-app.post("/login", async (req, res) => {
-  const user = await User.findOne({ username: req.body.username });
-  if (!user) return res.status(400).json({ error: "User not found" });
-
-  const ok = await bcrypt.compare(req.body.password, user.password);
-  if (!ok) return res.status(400).json({ error: "Wrong password" });
-
-  const token = jwt.sign({ userId: user._id }, JWT_SECRET);
-  res.json({ token });
-});
-
-// ───────── CHAT ─────────
-app.post("/chat", auth, async (req, res) => {
-  const { message, chatId } = req.body;
-
-  let chat = chatId
-    ? await Chat.findOne({ _id: chatId, userId: req.user.userId })
-    : null;
-
-  if (!chat) {
-    chat = await Chat.create({
-      userId: req.user.userId,
-      title: message.slice(0, 30),
-      messages: []
-    });
-  }
-
-  let context = "";
-  if (/latest|news|today/i.test(message)) {
-    context = await searchWeb(message);
-  }
-
-  const reply = await AI([
-    { role: "system", content: "You are XZILY AI" },
-    { role: "user", content: message + "\n" + context }
-  ]);
-
-  chat.messages.push({ role: "user", content: message });
-  chat.messages.push({ role: "assistant", content: reply });
-  await chat.save();
-
-  res.json({ reply, chatId: chat._id });
-});
-
-// ───────── GET CHATS ─────────
-app.get("/chats", auth, async (req, res) => {
-  const chats = await Chat.find({ userId: req.user.userId });
-  res.json({ chats });
-});
-
-// ───────── IMAGE ─────────
-app.post("/upload-image", auth, upload.single("image"), async (req, res) => {
-  const file = req.file;
-  const base64 = fs.readFileSync(file.path).toString("base64");
-
-  const reply = await callGemini([
-    { role: "user", content: "Analyze this image" }
-  ]);
-
-  fs.unlinkSync(file.path);
-
-  res.json({ reply });
-});
-
-app.listen(PORT, () => console.log("Server running"));
+module.exports = { app, User, Chat, upload, authMiddleware, callAI, callAIVision, webSearch, SYSTEM_PROMPT, cleanupFile, pdfParse, mammoth, PORT };
