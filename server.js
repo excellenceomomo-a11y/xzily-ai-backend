@@ -224,39 +224,71 @@ app.post("/chat", async (req, res) => {
 });
 
 // ================== VOICE ==================
-app.post("/voice", upload.single("audio"), async (req, res) => {
+app.post('/upload-image', authMiddleware, upload.single('image'), async (req, res) => {
   try {
-    const audioBuffer = req.file.buffer;
 
-    const form = new FormData();
-    form.append("file", audioBuffer, "audio.webm");
-    form.append("model", "whisper-large-v3");
+    // CHECK IF FILE EXISTS
+    if (!req.file) {
+      return res.status(400).json({
+        error: 'No image provided (field name must be "image")'
+      });
+    }
 
-    const response = await fetch(
-      "https://api.groq.com/openai/v1/audio/transcriptions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${GROQ_API_KEY}`
-        },
-        body: form
-      }
-    );
+    // DEBUG LOG
+    console.log("UPLOAD DEBUG:", {
+      file: req.file.originalname,
+      type: req.file.mimetype,
+      size: req.file.size
+    });
 
-    const data = await response.json();
+    const { message, chatId } = req.body;
+    const { mimetype, originalname, path: fPath } = req.file;
 
-    const text = data.text;
+    // CONVERT IMAGE TO BASE64
+    const base64Image = fs.readFileSync(fPath).toString('base64');
 
-    const reply = await callAI([
-      SYSTEM_PROMPT,
-      { role: "user", content: text }
-    ]);
+    const prompt = message || 'Please describe and analyze this image in detail.';
 
-    res.json({ text, reply });
+    // CALL AI VISION MODEL
+    const reply = await callGroqVision(base64Image, mimetype, prompt);
+
+    // CHAT HANDLING
+    let chat = chatId
+      ? await Chat.findOne({ _id: chatId, userId: req.user.userId })
+      : null;
+
+    if (!chat) {
+      chat = new Chat({
+        userId: req.user.userId,
+        title: `🖼️ ${originalname}`,
+        messages: []
+      });
+    }
+
+    chat.messages.push({
+      role: 'user',
+      content: `[Image: ${originalname}] ${prompt}`
+    });
+
+    chat.messages.push({
+      role: 'assistant',
+      content: reply
+    });
+
+    await chat.save();
+
+    cleanupFile(fPath);
+
+    res.json({
+      reply,
+      chatId: chat._id
+    });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Voice failed" });
+    console.error('Image upload error:', err);
+    res.status(500).json({
+      error: err.message || 'Image analysis failed'
+    });
   }
 });
 
